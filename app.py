@@ -1,7 +1,8 @@
-"""Serves Cloudflare's Clef-flash model as a local System One HTTP API.
+"""Serves Clef-flash (4-bit MLX build) as a local System One HTTP API.
 
-This is a proof of concept. The weights are loaded from the local Hugging Face
-cache, so nothing is downloaded. See README.md for an example request.
+This is a proof of concept for Apple Silicon. The weights and their loader,
+clef_mlx.py, come from the local Hugging Face cache, and the server never
+reaches the network. See README.md for an example request.
 
 Typical usage:
 
@@ -14,6 +15,7 @@ from collections.abc import AsyncIterator
 import contextlib
 import importlib
 import io
+import os
 import pathlib
 import sys
 import threading
@@ -22,29 +24,15 @@ from typing import Any
 import fastapi
 from PIL import Image
 from PIL import ImageOps
-import torch
 
 _HF_HUB = pathlib.Path.home() / ".cache/huggingface/hub"
-_REPO = _HF_HUB / "models--Cloudflare--clef-flash"
+_REPO = _HF_HUB / "models--mlx-community--clef-flash-4bit"
 MODEL_PATH = _REPO / "snapshots" / (_REPO / "refs/main").read_text().strip()
-# Use torch.float16 if MPS complains about bfloat16.
-DTYPE = torch.bfloat16
+MODEL_NAME = "clef-flash-4bit"
 # Images are downscaled to about 0.5 MP: the measured sweet spot between speed
 # and accuracy (see README.md). The hosted service uses about 1 MP.
 MAX_PIXELS = 512 * 1024
 MAX_IMAGES = 4
-
-
-def _pick_device() -> str:
-    """Returns the best available torch device."""
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-DEVICE = _pick_device()
 
 
 def _decode_image(item: str | dict[str, Any]) -> Image.Image:
@@ -81,16 +69,12 @@ def _decode_image(item: str | dict[str, Any]) -> Image.Image:
 @contextlib.asynccontextmanager
 async def _lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     """Loads the model once at startup and keeps it on application.state."""
-    # Cloudflare's model code ships with the weights, so import it from there.
+    # Everything is in the local cache, so never reach the network.
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    # The MLX loader ships with the weights, so import it from there.
     sys.path.insert(0, str(MODEL_PATH))
-    clef = importlib.import_module("joint_schema_model")
-    model, processor = clef.load_release_model(
-        str(MODEL_PATH), device=DEVICE, dtype=DTYPE
-    )
-    model.eval()
-    application.state.clef = clef
-    application.state.model = model
-    application.state.processor = processor
+    clef_mlx = importlib.import_module("clef_mlx")
+    application.state.model = clef_mlx.load(MODEL_PATH)
     # The GPU is the bottleneck, so run one request at a time.
     application.state.lock = threading.Lock()
     yield
@@ -101,8 +85,8 @@ app = fastapi.FastAPI(title="Clef System One", lifespan=_lifespan)
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    """Reports that the server is up, and which model and device it uses."""
-    return {"ok": True, "model": MODEL_PATH.name, "device": DEVICE}
+    """Reports that the server is up and which model it serves."""
+    return {"ok": True, "model": MODEL_NAME, "snapshot": MODEL_PATH.name}
 
 
 # A plain `def` endpoint runs in FastAPI's threadpool, so inference doesn't
@@ -121,11 +105,9 @@ def systemone(
     state = request.app.state
     try:
         decoded = [_decode_image(item) for item in images]
-        clef_request = {**body, "model": MODEL_PATH.name, "images": decoded}
+        clef_request = {**body, "model": MODEL_NAME, "images": decoded}
         with state.lock:
-            result = state.clef.systemone(
-                state.model, state.processor, clef_request
-            )
+            result = state.model.systemone(clef_request)
     except (ValueError, OSError) as e:  # Bad images or questions.
         raise fastapi.HTTPException(400, str(e)) from e
     return {"success": True, "errors": [], "messages": [], "result": result}

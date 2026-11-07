@@ -1,10 +1,4 @@
-torch>=2.11
-torchvision
-transformers==5.10.2
-accelerate
-safetensors
-huggingface_hub
-pillow
+mlx-vlm==0.7.4
 fastapi
 uvicorn
-python-multipart
+pillow

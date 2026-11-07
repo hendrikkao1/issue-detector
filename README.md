@@ -1,8 +1,8 @@
 # Clef System One API (POC)
 
-A local HTTP API for Cloudflare's **Clef-flash**. You send it screenshots and typed questions, and it returns a probability for each answer. It runs on Apple Silicon (MPS), NVIDIA (CUDA) or CPU, and nothing leaves your machine.
+A local HTTP API for Cloudflare's **Clef-flash**, using the 4-bit MLX build [`mlx-community/clef-flash-4bit`](https://huggingface.co/mlx-community/clef-flash-4bit) on Apple Silicon. You send it screenshots and typed questions, and it returns a probability for each answer. Nothing leaves your machine.
 
-`app.py` loads the weights from `~/.cache/huggingface/hub/models--Cloudflare--clef-flash`, using the snapshot that `refs/main` points to. Nothing is downloaded.
+`app.py` loads the weights and their loader, `clef_mlx.py`, from `~/.cache/huggingface/hub/models--mlx-community--clef-flash-4bit`, using the snapshot that `refs/main` points to. The server never reaches the network.
 
 ## First time only
 
@@ -12,6 +12,7 @@ Run these from the project folder:
 python3 -m venv .venv               # skip if .venv already exists
 source .venv/bin/activate
 pip install -r requirements.txt
+hf download mlx-community/clef-flash-4bit   # 6.2 GB, skip if already downloaded
 ```
 
 ## Start the server
@@ -21,21 +22,19 @@ source .venv/bin/activate           # once per terminal; your prompt then shows 
 uvicorn app:app --port 8788
 ```
 
-Wait for `Application startup complete`, which takes about 15 seconds while the model loads. Then:
+Wait for `Application startup complete`, which takes about 4 seconds. MLX loads the weights on first use, so the first request takes about 5 seconds and later ones about 2. Then:
 
-- Press **Ctrl+C** to stop the server, which frees the ~20 GB of memory it uses.
+- Press **Ctrl+C** to stop the server, which frees the ~10 GB of memory it uses.
 - Run `deactivate` to leave the virtualenv.
 - To skip activating, run `.venv/bin/uvicorn app:app --port 8788` instead.
 - To call it from another machine, add `--host 0.0.0.0`. There is no auth.
-
-The `[ERROR] ... is part of ... signature, but not documented` lines at startup are docstring warnings from transformers and can be ignored.
 
 ## Endpoints
 
 | Endpoint | What it does |
 |---|---|
 | `POST /v1/systemone` | Answers your questions about up to 4 images |
-| `GET /health` | Returns the model snapshot and device (`mps`, `cuda` or `cpu`). Use it to check that the server is up |
+| `GET /health` | Returns the model name and snapshot. Use it to check that the server is up |
 
 Interactive docs: http://127.0.0.1:8788/docs
 
@@ -78,21 +77,21 @@ Response for `test/01.png`, a Chrome "This site can't be reached" page:
   "errors": [],
   "messages": [],
   "result": {
-    "model": "fb4417d31c1d0f9e7e77f1141b40aaede7491e00",
+    "model": "clef-flash-4bit",
     "answers": {
-      "has_error": {"type": "noul", "noul": 0.9533},
+      "has_error": {"type": "noul", "noul": 0.9511},
       "error_kind": {
         "type": "choice",
         "choice": "browser_error_page",
-        "confidence": 0.8998,
+        "confidence": 0.9046,
         "probabilities": {
-          "none": 0.0141,
-          "browser_error_page": 0.8998,
-          "app_crash": 0.011,
-          "error_dialog": 0.0318,
-          "error_banner_or_toast": 0.0187,
-          "stack_trace": 0.0137,
-          "failed_operation": 0.011
+          "none": 0.0127,
+          "browser_error_page": 0.9046,
+          "app_crash": 0.0127,
+          "error_dialog": 0.0295,
+          "error_banner_or_toast": 0.0153,
+          "stack_trace": 0.0135,
+          "failed_operation": 0.0116
         }
       }
     },
@@ -130,9 +129,9 @@ Bad input returns HTTP 400 with `{"detail": "..."}`.
 
 Settings are constants at the top of `app.py`:
 
-- **Image size:** `MAX_PIXELS` defaults to 0.5 MP, which measured as the sweet spot on 5K screenshots. It takes about 2 s per screenshot, compared with about 3.4 s at 1 MP (the hosted service's size), and gave the same verdicts on every screenshot in `test/`. Those include a small error dialog and a text-only banner. Higher settings didn't improve any answer and cost more time: about 6 s at 2 MP and 15 s at 4 MP. For very small toasts on big screens, you can crop the screenshot into up to 4 tiles and send them as separate images.
-- **MPS issues:** if you see bfloat16 errors, set `DTYPE = torch.float16`.
+- **Image size:** `MAX_PIXELS` defaults to 0.5 MP, which measured as the sweet spot on 5K screenshots. It gave the same verdicts on every screenshot in `test/` as larger settings did, including a small error dialog and a text-only banner. Higher settings didn't improve any answer and cost more time. On the earlier PyTorch backend it took 2.1 s at 0.5 MP, 3.6 s at 1 MP (the hosted service's size), about 6 s at 2 MP and 15 s at 4 MP. For very small toasts on big screens, you can crop the screenshot into up to 4 tiles and send them as separate images.
+- **Prompt length:** about half of the model time is the prompt text. The example's ~615 text tokens take about 0.8 s on their own, so a shorter `state` is the cheapest speedup.
 
-Requests are processed one at a time because the GPU is the bottleneck. Expect about 2 seconds per screenshot on a Mac.
+Requests are processed one at a time because the GPU is the bottleneck. Expect about 1.9 seconds per screenshot on an M3 Max, compared with 2.2 s on the earlier PyTorch backend.
 
 When an answer hovers near 0.5 at every resolution, the definition in `state` is usually ambiguous for that case, so add a sentence that settles it. That's how the sign-in sentence in the example came about.
