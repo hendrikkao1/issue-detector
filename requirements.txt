@@ -1,0 +1,10 @@
+torch>=2.11
+torchvision
+transformers==5.10.2
+accelerate
+safetensors
+huggingface_hub
+pillow
+fastapi
+uvicorn
+python-multipart
